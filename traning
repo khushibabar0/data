@@ -1,0 +1,135 @@
+import numpy as np
+import pandas as pd
+import seaborn as sns
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import LabelEncoder
+from imblearn.over_sampling import SMOTE
+from sklearn.model_selection import train_test_split
+import xgboost as xgb
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, roc_curve, auc
+from sklearn.ensemble import IsolationForest, RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
+
+# Display settings
+pd.set_option('display.max_rows', None)
+pd.set_option('display.max_columns', None)
+pd.set_option('display.width', 1000)
+
+# Suppress warnings
+import warnings
+from sklearn.exceptions import ConvergenceWarning
+warnings.simplefilter("ignore", ConvergenceWarning)
+
+# Load dataset
+data = pd.read_csv(r'C:\Users\shett\Downloads\WA_Fn-UseC_-Telco-Customer-Churn.csv')
+print("Dataset Shape:", data.shape)
+print("Null values:")
+print(data.isnull().sum())
+
+# Unique values for categorical features
+features = ['gender', 'Partner', 'Dependents', 'PhoneService', 'MultipleLines', 'InternetService', 'OnlineSecurity',
+            'OnlineBackup', 'DeviceProtection', 'TechSupport', 'StreamingTV', 'StreamingMovies', 'Contract',
+            'PaperlessBilling', 'PaymentMethod', 'Churn']
+for feature in features:
+    print(f"{feature}: {data[feature].unique()}")
+
+# Validate customerID pattern
+pattern = r"^\d{4}-[A-Z]{4}[A-Z]{1}$"
+data["valid_customerID"] = data["customerID"].str.match(pattern)
+invalid_customerID = data[~data["valid_customerID"]]
+if invalid_customerID.empty:
+    print("No invalid customerIDs found.")
+else:
+    print("Invalid customerIDs found:")
+    print(invalid_customerID)
+
+# Encode categorical features
+encoder = LabelEncoder()
+for feature in features:
+    data[feature] = encoder.fit_transform(data[feature])
+
+# Convert TotalCharges to numeric and handle missing values
+data['TotalCharges'] = pd.to_numeric(data['TotalCharges'], errors='coerce').fillna(0).astype(int)
+
+# Drop unnecessary columns
+data = data.drop(columns=['customerID'], axis=1)
+
+# Visualize class distribution before SMOTE
+sns.countplot(x='Churn', data=data)
+plt.title("Class Distribution Before SMOTE")
+plt.show()
+
+# Define features and target
+X = data.drop(columns=['Churn'], axis=1)
+Y = data['Churn']
+
+# Apply SMOTE for balancing the dataset
+smote = SMOTE(random_state=45, k_neighbors=5, sampling_strategy='minority')
+X_sampled, Y_sampled = smote.fit_resample(X, Y)
+
+# Visualize class distribution after SMOTE
+sns.countplot(x='Churn', data=pd.DataFrame(Y_sampled))
+plt.title("Class Distribution After SMOTE")
+plt.show()
+
+# Apply Isolation Forest for anomaly detection
+sampled_data = pd.concat([X_sampled, Y_sampled], axis=1)
+iso = IsolationForest(contamination=0.01, random_state=42)
+sampled_data['Anomaly'] = iso.fit_predict(sampled_data.iloc[:, :-1])
+outliers = sampled_data[sampled_data['Anomaly'] == -1]
+data_cleaned = sampled_data[sampled_data['Anomaly'] == 1].drop(columns=['Anomaly'])
+print(f"Number of Outliers Detected: {len(outliers)}")
+
+# Correlation heatmap
+plt.figure(figsize=(15, 15))
+sns.heatmap(data_cleaned.corr(), annot=True, square=True)
+plt.show()
+
+# Feature selection
+columns_to_drop = ['gender', 'SeniorCitizen', 'Partner', 'PhoneService', 'MultipleLines', 'DeviceProtection',
+                   'TechSupport', 'PaperlessBilling', 'PaymentMethod', 'Churn']
+X = data_cleaned.drop(columns=columns_to_drop)
+Y = data_cleaned['Churn']
+
+# Train-test split
+X_train, X_test, Y_train, Y_test = train_test_split(X, Y, test_size=0.2, stratify=Y, random_state=12)
+
+# XGBoost Classifier
+xgb_model = xgb.XGBClassifier(n_estimators=110, eval_metric='logloss', alpha=0.1, reg_lambda=1,
+                              learning_rate=0.05, max_depth=5)
+xgb_model.fit(X_train, Y_train)
+
+# Evaluate XGBoost
+print("XGBoost Accuracy:")
+print("Training:", accuracy_score(Y_train, xgb_model.predict(X_train)))
+print("Testing:", accuracy_score(Y_test, xgb_model.predict(X_test)))
+print("Classification Report:")
+print(classification_report(Y_test, xgb_model.predict(X_test)))
+
+# ROC Curve for XGBoost
+y_scores = xgb_model.predict_proba(X_test)[:, 1]
+fpr, tpr, _ = roc_curve(Y_test, y_scores)
+plt.plot(fpr, tpr, label=f'ROC AUC = {auc(fpr, tpr):.2f}')
+plt.plot([0, 1], [0, 1], linestyle='--', color='grey')
+plt.xlabel('False Positive Rate')
+plt.ylabel('True Positive Rate')
+plt.title('ROC Curve - XGBoost')
+plt.legend()
+plt.show()
+
+# Logistic Regression
+linear_model = LogisticRegression(max_iter=500)
+linear_model.fit(X_train, Y_train)
+print("Logistic Regression Accuracy:")
+print("Training:", accuracy_score(Y_train, linear_model.predict(X_train)))
+print("Testing:", accuracy_score(Y_test, linear_model.predict(X_test)))
+
+# Random Forest Classifier
+random_model = RandomForestClassifier(min_samples_leaf=25, max_depth=15)
+random_model.fit(X_train, Y_train)
+print("Random Forest Accuracy:")
+print("Training:", accuracy_score(Y_train, random_model.predict(X_train)))
+print("Testing:", accuracy_score(Y_test, random_model.predict(X_test)))
+
+# Save the XGBoost model
+xgb_model.save_model("xgb_model.bin")
